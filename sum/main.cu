@@ -31,12 +31,24 @@ static_assert(WARP_SZ == 32, "Yeah... this is assumed in a lot of places.");
 static_assert(GPU_THREADS >= MAX_GPU_BLOCKS, "o.w. gbl scans require a loop");
 
 // GPU kernel: C[i] = A[i] + B[i]
+// simple kernel style: one thread per element
 __global__ void sumKernel(float *d_A, float *d_B, float *d_C, int N) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < N) {
         d_C[idx] = d_A[idx] + d_B[idx];
     }
 }
+
+// grid kernel style: one thread per block
+__global__ void sumKernel_stride(const float* A, const float* B, float* C, int N) {
+    int idx    = blockDim.x * blockIdx.x + threadIdx.x;   // starting index
+    int stride = blockDim.x * gridDim.x;                  // jump size
+
+    for (int i = idx; i < N; i += stride) {
+        C[i] = A[i] + B[i];
+    }
+}
+
 
 int main(int argc, char **argv) {
     const char* fileName = "sample.txt";
@@ -92,7 +104,7 @@ int main(int argc, char **argv) {
     size_t threadsPerBlock = GPU_THREADS;
     size_t blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 
-    sumKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
+    sumKernel_stride<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, N);
 
     CUDA_CHECK(cudaGetLastError());          // check launch error
     CUDA_CHECK(cudaDeviceSynchronize());     // wait for GPU to finish
@@ -106,15 +118,15 @@ int main(int argc, char **argv) {
     // ---- Print result ----
     printf("N = %d\n", N);
     printf("A: \t\t");
-    for (int i = 0; i < N; ++i) printf("%g ", h_A[i]);
+    for (int i = 0; i < N; ++i) printf("%g\t", h_A[i]);
     printf("\n");
 
     printf("B: \t\t");
-    for (int i = 0; i < N; ++i) printf("%g ", h_B[i]);
+    for (int i = 0; i < N; ++i) printf("%g\t", h_B[i]);
     printf("\n");
 
     printf("C = A + B: \t");
-    for (int i = 0; i < N; ++i) printf("%g ", h_C[i]);
+    for (int i = 0; i < N; ++i) printf("%g\t", h_C[i]);
     printf("\n");
 
 
