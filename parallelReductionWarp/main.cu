@@ -32,13 +32,49 @@ static_assert(WARP_SZ == 32, "Yeah... this is assumed in a lot of places.");
 static_assert(GPU_THREADS >= MAX_GPU_BLOCKS, "o.w. gbl scans require a loop");
 
 
-__global__ void reduceKernel(float *d_A, float *d_block_sums, int N) {
-    extern __shared__ float s_data[]; // shared memory buffer
+// Sum 'val' across the 32 threads of a warp
+__inline__ __device__
+float warpReduceSum(float val) {
+    // Full mask: all 32 lanes active
+    unsigned int mask = 0xffffffff;
+    // Tree reduction: add values from threads offset away
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        val += __shfl_down_sync(mask, val, offset);
+    }
+    return val;
+}
 
-     // global thread index
-     size_t tid  = threadIdx.x;
-     size_t idx  = blockIdx.x * blockDim.x + threadIdx.x;
-     size_t grid = blockDim.x * gridDim.x;
+__inline__ __device__
+float blockReduceSum(float val) {
+    __shared__ float shared[32];
+
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
+
+    val = warpReduceSum(val);
+
+    if(lane == 0) {
+        shared[wid] = val;
+    }
+    __syncthreads();
+
+    val = (threadIdx.x < blockDim.x / warpSize ) ? shared[lane] : 0.0f;
+
+    if(wid == 0){
+        // first warp
+        val = warpReduceSum(val);
+    }
+    return val;
+}
+
+__global__ void reduceKernel(const float *d_A, float *d_block_sums, int N) {
+    // __global__ void reduceKernel(const float __restrict__ *d_A, float __restrict__ *d_block_sums, int N) {
+    // extern __shared__ float s_data[]; // shared memory buffer
+
+    // global thread index
+    size_t tid  = threadIdx.x;
+    size_t idx  = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t grid = blockDim.x * gridDim.x;
 
     // 1) Each thread computes a local sum over a grid-stride loop
     float local_sum = 0.0f;
@@ -46,22 +82,12 @@ __global__ void reduceKernel(float *d_A, float *d_block_sums, int N) {
         local_sum += d_A[i];
     }
 
-    // 2) Store in shared memory
-    s_data[tid] = local_sum;
-    __syncthreads();
-
-
-    // 3) Reduction: reduce local sums to a single value
-    for (size_t s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            s_data[tid] += s_data[tid + s];
-        }
-        __syncthreads();
-    }
+    // 2) Reduce local sums to a single value
+    float block_sum = blockReduceSum(local_sum);
 
     // 4) Write result to output array
     if (tid == 0) {
-        d_block_sums[blockIdx.x] = s_data[0];
+        d_block_sums[blockIdx.x] = block_sum;
     }
 }
 
@@ -76,6 +102,7 @@ float reduceWrapper(float *d_A, int N) {
     if(blocksPerGrid * threadsPerBlock > N) {
         blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
     }
+    if(blocksPerGrid == 0) blocksPerGrid = 1;
 
 
     // per block sum:
@@ -86,12 +113,9 @@ float reduceWrapper(float *d_A, int N) {
         return EXIT_FAILURE;
     }
 
-    size_t sharedMemPerBlock = threadsPerBlock * sizeof(float);
-    // size_t sharedMemPerBlock = sharedMem / blockCount;
-
-    reduceKernel<<<blocksPerGrid, threadsPerBlock, sharedMemPerBlock>>>(d_A, d_block_sums, N);
-    CUDA_CHECK(cudaGetLastError());          // check launch error
-    CUDA_CHECK(cudaDeviceSynchronize());     // wait for GPU to finish
+    reduceKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_block_sums, N);
+    cudaDeviceSynchronize();
+    
 
     // now we have 'blocks' partial sums in d_block_sums
     // if blocks is small, copy back and finish on CPU
