@@ -67,7 +67,7 @@ float blockReduceSum(float val) {
     return val;
 }
 
-__global__ void reduceKernel(const float *d_A, float *d_block_sums, int N) {
+__global__ void reduceKernel(const float* __restrict__ d_A, float* __restrict__ d_block_sums, int N) {
     // __global__ void reduceKernel(const float __restrict__ *d_A, float __restrict__ *d_block_sums, int N) {
     // extern __shared__ float s_data[]; // shared memory buffer
 
