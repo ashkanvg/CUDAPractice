@@ -46,7 +46,7 @@ __global__ void blockScanExclusive(const float* d_in, float* d_out, float* d_blo
     extern __shared__ float s_data[]; // size = 2 * blockDim.x
 
     int tid = threadIdx.x;
-    int idx = blockDim.x * blockIdx.x + tid;
+    // int idx = blockDim.x * blockIdx.x + tid;
 
     int blockStart = 2 * blockIdx.x * blockDim.x;
 
@@ -274,8 +274,8 @@ void exclusive_scan_host(std::vector<float>& arr) {
     }
 }
 
-__global__ void addBlockOffset(const float* d_in, float* out, float* d_block_sums, const int N){
-    int tid = threadIdx.x;
+__global__ void addBlockOffset(const float* d_in, float* d_out, float* d_block_sums, const int N){
+    // int tid = threadIdx.x;
     int idx = threadIdx.x + blockDim.x * blockIdx.x;
     int stride = blockDim.x * gridDim.x;
 
@@ -296,7 +296,7 @@ int main(int argc, char **argv) {
     }
 
     // Allocate memory on device
-    float *d_in = nullptr, d_out = nullptr, *d_block_sums = nullptr;
+    float *d_in = nullptr, *d_out = nullptr, *d_block_sums = nullptr;
     cudaMalloc(&d_in, N * sizeof(float));
     cudaMalloc(&d_out, N * sizeof(float));
     if(!d_in || !d_out) {
@@ -312,12 +312,20 @@ int main(int argc, char **argv) {
     // Launch kernel 
     // step 0: 
     size_t threadsPerBlock = GPU_THREADS;
-    size_t blocksPerGrid = (threadsPerBlock + N - 1) / threadsPerBlock;
     size_t elementsPerBlock = 2 * threadsPerBlock;
+    size_t blocksPerGrid = (elementsPerBlock + N - 1) / elementsPerBlock;
+
+    cudaMalloc(&d_block_sums, blocksPerGrid * sizeof(float));
+    if(!d_block_sums) {
+        fprintf(stderr, "Failed to allocate memory on device for block sums.\n");
+        cudaFree(d_in);
+        cudaFree(d_out);
+        return EXIT_FAILURE;
+    }
 
     // step 1:
     size_t shmem_bytes = elementsPerBlock*sizeof(float);
-    blockScanExclusive<<<blocksPerGrid, threadsPerBlock, elementsPerBlock>>>(d_in, d_out, d_block_sums, N);
+    blockScanExclusive<<<blocksPerGrid, threadsPerBlock, shmem_bytes>>>(d_in, d_out, d_block_sums, N);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -330,7 +338,7 @@ int main(int argc, char **argv) {
 
 
     // step 3: 
-    addBlockOffset<<<blocksPerGrid, threadsPerBlock, elementsPerBlock>>>(d_in, d_out, d_block_sums, N);
+    addBlockOffset<<<blocksPerGrid, threadsPerBlock, shmem_bytes>>>(d_in, d_out, d_block_sums, N);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -350,6 +358,7 @@ int main(int argc, char **argv) {
             return EXIT_FAILURE;
         }
     }
+    std::cout << "Validation passed" << std::endl;
 
     cudaFree(d_in);
     cudaFree(d_out);
