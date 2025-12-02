@@ -38,42 +38,22 @@ static_assert(GPU_THREADS >= MAX_GPU_BLOCKS, "o.w. gbl scans require a loop");
 
 
 __global__ 
-void histogram256Warp(unsigned char* __restrict__ d_A, unsigned int* __restrict__ d_hist, int N){
+void histogram256(unsigned char* __restrict__ d_A, unsigned int* __restrict__ d_hist, int N){
     __shared__ unsigned int s_hist[256];
     size_t tid = threadIdx.x;
+
+    // 1) use all threads to initiate shared memory
+    for(size_t bin = tid; bin < 256; bin+= blockDim.x){
+        s_hist[bin] = 0;
+    }
+    __syncthreads();
+
+    // 2) update histogram
     size_t idx = blockIdx.x * blockDim.x + tid;
     size_t stride = blockDim.x * gridDim.x;
-    size_t lane = threadIdx.x & 31;
-
-    for(size_t i = idx; ; i+=stride){
-        bool in_range = (i < N);
-        
-        // Active mask: which lanes in this warp are still in-range?
-        unsigned int active = __ballot_sync(0xffffffff, in_range);
-
-        if(active == 0)
-            break;
-
-        unsigned char my_bin = in_range ? d_A[i] : 0;
-        unsigned int remaining = active;
-
-        while(remaining){
-            int leader = __ffs(remaining) - 1; // Pick a "leader" lane: index of least-significant set bit in 'remaining'
-
-            unsigned char leader_bin = __shfl_sync(remaining, my_bin, leader); // Broadcast leader's bin to all lanes participating in 'remaining'
-
-            unsigned int eq_mask = __ballot_sync(remaining, in_range && (my_bin == leader_bin)); // Find all lanes (within 'remaining') that have this same bin
-
-            // Let the leader lane perform a single atomicAdd with the total count
-            if(lane == leader){
-                unsigned int count = __popc(eq_mask);
-                atomicAdd(&d_hist[leader_bin], count);
-            }
-
-            // remove those lanes from 'remaining'
-            remaining &= ~eq_mask;
-
-        }
+    for(size_t i = idx; i < N; i+=stride){
+        unsigned char v = d_A[i];
+        atomicAdd(&s_hist[v], 1);
     }
     __syncthreads();
 
@@ -127,7 +107,7 @@ int main(int argc, char **argv) {
     }
     if(blocksPerGrid == 0) blocksPerGrid = 1;
 
-    histogram256Warp<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_hist, N);
+    histogram256<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_hist, N);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
